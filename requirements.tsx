@@ -1,0 +1,12 @@
+fastapi==0.121.2
+uvicorn==0.38.0
+openai==2.7.2
+langchain==1.0.5
+langchain-core==1.0.4
+langchain-community==0.4.1
+pinecone==7.3.0
+pydantic==2.12.4
+langchain-openai
+langchain-pinecone
+langchain-text-splitters
+requests
