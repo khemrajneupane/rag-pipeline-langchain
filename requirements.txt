@@ -10,3 +10,5 @@ langchain-openai
 langchain-pinecone
 langchain-text-splitters
 requests
+python-multipart
+
