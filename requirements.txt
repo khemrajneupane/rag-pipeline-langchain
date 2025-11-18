@@ -12,4 +12,5 @@ langchain-text-splitters
 python-multipart
 requests
 slowapi
+pypdf
 
