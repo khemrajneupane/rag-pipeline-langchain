@@ -1,22 +1,26 @@
+from fastapi import FastAPI, UploadFile, File, Header, HTTPException,Depends,Request
 from langchain_community.document_loaders import PyPDFDirectoryLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from fastapi import FastAPI, UploadFile, File, HTTPException
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain_core.output_parsers import StrOutputParser
 from langchain_pinecone import PineconeVectorStore
 from fastapi.middleware.cors import CORSMiddleware
 from langchain_core.prompts import PromptTemplate
 from langchain_core.runnables import RunnableMap
-from fastapi import UploadFile, File
+from fastapi.responses import PlainTextResponse
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 from dotenv import load_dotenv
 from pydantic import BaseModel
 from pinecone import Pinecone
+from slowapi import Limiter
 import os
 
 load_dotenv()
 api_key = os.getenv("OPENAI_API_KEY")
 pinecone_api_key = os.getenv("PINECONE_API_KEY")
 pinecone_index = os.getenv("PINECONE_INDEX")
+api_key_protection = os.getenv("API_KEY_PROTECTION")
 
 # ---------------------------------------------------------
 # YOUR EXISTING FUNCTIONS (UNCHANGED)
@@ -94,6 +98,25 @@ rag_chain = (
 # ---------------------------------------------------------
 app = FastAPI(title="RAG Q/A API")
 
+# ---------------------------------------------------------
+# Verify API key function to protect routes
+# ---------------------------------------------------------
+async def verify_api_key(api_key: str = Header(None, alias="X-API-Key")):
+    if api_key != api_key_protection:
+        raise HTTPException(status_code=401, detail="Invalid API Key")
+    return api_key
+
+# ---------------------------------------------------------
+# Rate-limit handler
+# ---------------------------------------------------------
+limiter = Limiter(key_func=get_remote_address)
+
+app.state.limiter = limiter
+
+@app.exception_handler(RateLimitExceeded)
+def rate_limit_handler(request, exc):
+    return PlainTextResponse("Too Many Requests", status_code=429)
+
 # Allow frontend calls (Next.js)
 app.add_middleware(
     CORSMiddleware,
@@ -111,7 +134,12 @@ class Question(BaseModel):
 # API ENDPOINT /ask
 # ---------------------------------------------------------
 @app.post("/ask")
-async def ask_question(payload: Question):
+@limiter.limit("1/minute")  # each IP: max 5 questions per minute. Can be adjusted 10/hour,50/day,1/sec etc.
+async def ask_question(
+    request: Request, 
+    payload: Question,
+    api_key: str = Depends(verify_api_key)
+    ):
     answer = rag_chain.invoke({"query": payload.query})
     return {"answer": answer}
 
@@ -119,7 +147,12 @@ async def ask_question(payload: Question):
 # API ENDPOINT — UPLOAD NEW PDF + DELETE OLD FILES 
 # ---------------------------------------------------------
 @app.post("/upload_pdf")
-async def upload_pdf(file: UploadFile = File(...)):
+@limiter.limit("1/minute") 
+async def upload_pdf(
+    request: Request,
+    file: UploadFile = File(...),
+    api_key: str = Depends(verify_api_key)
+    ):
     global vector_store, retriever, rag_chain
 
     if not file.filename.lower().endswith('.pdf'):
