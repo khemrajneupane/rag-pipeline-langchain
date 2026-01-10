@@ -120,7 +120,7 @@ def rate_limit_handler(request, exc):
 # Allow frontend calls (Next.js)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://www.khemrajneupane.com"],
+    allow_origins=["https://khemrajneupane.com"],
     allow_methods=["*"],
     allow_headers=["*"]
 )
@@ -232,4 +232,5 @@ async def delete_index():
 # ---------------------------------------------------------
 # RUN SERVER:
 # uvicorn app:app --reload
+# http://localhost:8000/docs for docs
 # ---------------------------------------------------------
