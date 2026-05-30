@@ -164,7 +164,7 @@ def rate_limit_handler(request, exc):
 # Allow frontend calls (Next.js)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["https://khemrajneupane.com","http://localhost:3000"],
     allow_methods=["*"],
     allow_headers=["*"]
 )
