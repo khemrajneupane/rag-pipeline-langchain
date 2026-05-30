@@ -1,7 +1,11 @@
-from fastapi import FastAPI, UploadFile, File, Header, HTTPException,Depends,Request
+from fastapi import FastAPI, UploadFile, File, Header, HTTPException, Depends, Request
 from langchain_community.document_loaders import PyPDFDirectoryLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_openai import OpenAIEmbeddings, ChatOpenAI
+# from langchain_openai import OpenAIEmbeddings, ChatOpenAI  # re-enable if switching back to OpenAI
+# from langchain_community.embeddings import HuggingFaceInferenceAPIEmbeddings  # api-inference.huggingface.co retired
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from langchain_groq import ChatGroq
+import groq
 from langchain_core.output_parsers import StrOutputParser
 from langchain_pinecone import PineconeVectorStore
 from fastapi.middleware.cors import CORSMiddleware
@@ -10,14 +14,17 @@ from langchain_core.runnables import RunnableMap
 from fastapi.responses import PlainTextResponse
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
+from pinecone import Pinecone, ServerlessSpec
 from dotenv import load_dotenv
 from pydantic import BaseModel
-from pinecone import Pinecone
 from slowapi import Limiter
+import time
 import os
 
 load_dotenv()
-api_key = os.getenv("OPENAI_API_KEY")
+# api_key = os.getenv("OPENAI_API_KEY")  # re-enable if switching back to OpenAI
+groq_api_key = os.getenv("GROQ_API_KEY")
+google_api_key = os.getenv("GOOGLE_API_KEY")
 pinecone_api_key = os.getenv("PINECONE_API_KEY")
 pinecone_index = os.getenv("PINECONE_INDEX")
 api_key_protection = os.getenv("API_KEY_PROTECTION")
@@ -41,10 +48,46 @@ def chunk_data(docs, chunk_size=800, chunk_overlap=200):
 # ---------------------------------------------------------
 # EMBEDDING + PINECONE + VECTOR STORE
 # ---------------------------------------------------------
-embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
+# embeddings = OpenAIEmbeddings(model="text-embedding-3-small")  # re-enable if switching back to OpenAI
+# embeddings = HuggingFaceInferenceAPIEmbeddings(...)  # api-inference.huggingface.co retired
+_base_embeddings = GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-001", google_api_key=google_api_key)
+EMBEDDING_DIMENSION = 3072  # gemini-embedding-001 produces 3072-dim vectors (OpenAI text-embedding-3-small was 1536)
+
+class RateLimitedEmbeddings:
+    """Wraps Google embeddings to stay under the 100 RPM free-tier limit (0.7s delay per call)."""
+    def embed_documents(self, texts):
+        results = []
+        for text in texts:
+            results.append(_base_embeddings.embed_query(text))
+            time.sleep(0.7)
+        return results
+    def embed_query(self, text):
+        return _base_embeddings.embed_query(text)
+
+embeddings = RateLimitedEmbeddings()
 
 pc = Pinecone(api_key=pinecone_api_key)
 index_name = pinecone_index
+
+# Auto-recreate the Pinecone index if the dimension doesn't match the current embedding model.
+# This is required when switching embedding providers (e.g. OpenAI 1536-dim → Gemini 3072-dim).
+all_indexes = list(pc.list_indexes())
+index_names = [i.name for i in all_indexes]
+
+if index_name in index_names:
+    current_dim = next(i.dimension for i in all_indexes if i.name == index_name)
+    if current_dim != EMBEDDING_DIMENSION:
+        pc.delete_index(index_name)
+        index_names = []
+
+if index_name not in index_names:
+    pc.create_index(
+        name=index_name,
+        dimension=EMBEDDING_DIMENSION,
+        metric="cosine",
+        spec=ServerlessSpec(cloud="aws", region="us-east-1")
+    )
+
 index = pc.Index(index_name)
 
 # Initialize vector store, pointing to existing pinecone index. (This is not adding embedding to db)
@@ -65,7 +108,8 @@ retriever = vector_store.as_retriever(
     search_kwargs={"k": 5}  # Increased k to 5 for better retrieval
 )
 
-llm = ChatOpenAI(model="gpt-4o")
+# llm = ChatOpenAI(model="gpt-4o")  # re-enable if switching back to OpenAI
+llm = ChatGroq(model="llama-3.3-70b-versatile", api_key=groq_api_key)
 
 def format_docs(docs):
     return "\n\n".join([d.page_content for d in docs])
@@ -120,7 +164,7 @@ def rate_limit_handler(request, exc):
 # Allow frontend calls (Next.js)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://khemrajneupane.com"],
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"]
 )
@@ -140,8 +184,11 @@ async def ask_question(
     payload: Question,
     api_key: str = Depends(verify_api_key)
     ):
-    answer = rag_chain.invoke({"query": payload.query})
-    return {"answer": answer}
+    try:
+        answer = rag_chain.invoke({"query": payload.query})
+        return {"answer": answer}
+    except groq.RateLimitError:
+        raise HTTPException(status_code=429, detail="Groq rate limit reached. Please try again shortly.")
 
 # ---------------------------------------------------------
 # API ENDPOINT — UPLOAD NEW PDF + DELETE OLD FILES 
@@ -212,8 +259,11 @@ async def upload_pdf(
             | StrOutputParser()
         )
 
+    except groq.RateLimitError:
+        if os.path.exists(pdf_path):
+            os.remove(pdf_path)
+        raise HTTPException(status_code=429, detail="Groq rate limit reached. Please try again shortly.")
     except Exception as e:
-        # Clean up on error
         if os.path.exists(pdf_path):
             os.remove(pdf_path)
         raise HTTPException(status_code=500, detail=f"Error processing PDF: {str(e)}")
